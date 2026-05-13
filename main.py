@@ -1,18 +1,20 @@
 import serial
 import time
+import csv
+import os
+from datetime import datetime
 
 # Configure these to match your setup
-PORT = 'COM6'  # Change to your COM port
-BAUD = 19200  # Match your VCU setting
-
+PORT = 'COM6'      # Change to your COM port
+BAUD = 19200       # Match your VCU setting
+LOG_DIR = 'logs'   # Directory to save log files
 
 def send_command(ser, command):
     """Send a command and return the response."""
     ser.write((command + '\r').encode('ascii'))
-    time.sleep(0.1)  # Give the VCU time to respond
+    time.sleep(0.1)
     response = ser.readline().decode('ascii').strip()
     return response
-
 
 def parse_pressure(response):
     """Parse the RPV response into status and pressure value."""
@@ -45,19 +47,54 @@ def parse_pressure(response):
 
     return status, pressure
 
+def get_log_filepath():
+    """Return the log file path for today's date."""
+    os.makedirs(LOG_DIR, exist_ok=True)
+    date_str = datetime.now().strftime('%Y-%m-%d')
+    return os.path.join(LOG_DIR, f'vcu_log_{date_str}.csv')
+
+def write_header_if_needed(filepath):
+    """Write CSV header if the file doesn't exist yet."""
+    if not os.path.exists(filepath):
+        with open(filepath, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                'Timestamp',
+                'CH1 Pressure', 'CH1 Status',
+                'CH2 Pressure', 'CH2 Status',
+                'CH3 Pressure', 'CH3 Status'
+            ])
+
+def log_reading(timestamp, readings):
+    """Append a reading to today's log file."""
+    filepath = get_log_filepath()
+    write_header_if_needed(filepath)
+
+    with open(filepath, 'a', newline='') as f:
+        writer = csv.writer(f)
+        row = [timestamp]
+        for status, pressure in readings:
+            row.extend([pressure, status])
+        writer.writerow(row)
 
 def read_all_channels(ser):
-    """Read pressure from all 3 channels."""
-    print("-" * 40)
+    """Read pressure from all 3 channels, return list of (status, pressure) tuples."""
+    readings = []
     for channel in range(1, 4):
         response = send_command(ser, f'RPV{channel}')
         if response:
             status, pressure = parse_pressure(response)
-            print(f'Channel {channel}: {pressure} mbar  (Status: {status})')
         else:
-            print(f'Channel {channel}: No response')
-    print("-" * 40)
+            status, pressure = 'No response', 'N/A'
+        readings.append((status, pressure))
+    return readings
 
+def print_readings(timestamp, readings):
+    """Print readings to console."""
+    print("-" * 50)
+    print(f'Timestamp: {timestamp}')
+    for i, (status, pressure) in enumerate(readings, start=1):
+        print(f'  Channel {i}: {pressure} mbar  (Status: {status})')
 
 def main():
     try:
@@ -71,15 +108,17 @@ def main():
         )
         print(f'Connected to {PORT} at {BAUD} baud')
 
-        # First check firmware version
         version = send_command(ser, 'RVN')
         print(f'VCU firmware version: {version}')
+        print(f'Logging to: {LOG_DIR}/')
         print()
-
-        # Continuously read all channels
         print('Reading channels (Ctrl+C to stop)...')
+
         while True:
-            read_all_channels(ser)
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            readings = read_all_channels(ser)
+            print_readings(timestamp, readings)
+            log_reading(timestamp, readings)
             time.sleep(1)
 
     except serial.SerialException as e:
@@ -90,7 +129,6 @@ def main():
         if 'ser' in locals() and ser.is_open:
             ser.close()
             print('Port closed')
-
 
 if __name__ == '__main__':
     main()
