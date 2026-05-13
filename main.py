@@ -159,11 +159,25 @@ class CSVLogger:
 
 
 # --------------------------------------------------------------
-# 4️⃣  GUI – Tkinter + Matplotlib
+#  Custom toolbar – catches the Home button
+# --------------------------------------------------------------
+class MyToolbar(NavigationToolbar2Tk):
+    """Toolbar that notifies the GUI when the Home button is pressed."""
+    def __init__(self, canvas, window, gui):
+        super().__init__(canvas, window)
+        self.gui = gui                     # reference to the VCUGui instance
+
+    def home(self):
+        """Reset view and tell the GUI to re‑enable auto‑scroll."""
+        super().home()                    # perform the normal Matplotlib home action
+        self.gui._reset_autoscroll()      # tell VCUGui that scrolling may continue
+
+
+# --------------------------------------------------------------
+#  VCUGui – Tkinter window with scrollable / zoomable plot
 # --------------------------------------------------------------
 class VCUGui(tk.Tk):
-    UPDATE_MS = 1000                # 1 s
-    WINDOW_SECONDS = 60            # show last 60 s (adjust as you like)
+    UPDATE_MS = 1000          # measurement interval [ms]
 
     def __init__(self, vcu: JevaMetVCU, logger: CSVLogger):
         super().__init__()
@@ -173,26 +187,30 @@ class VCUGui(tk.Tk):
 
         self.vcu = vcu
         self.logger = logger
-        self.running = False
+
+        self.running = False          # acquisition flag
         self.unit = "unknown"
         self.start_time = None
+
+        self.autoscroll = True        # True → x‑axis follows new data
+        self._updating_limits = False # internal flag to separate user vs code changes
 
         self._build_widgets()
         self._init_plot()
 
     # ------------------------------------------------------
     def _build_widgets(self):
-        # ---- Control ----
-        ctl = ttk.LabelFrame(self, text="Control")
-        ctl.pack(fill="x", padx=10, pady=5)
+        # ----- Control panel -----
+        ctrl = ttk.LabelFrame(self, text="Control")
+        ctrl.pack(fill="x", padx=10, pady=5)
 
-        self.btn_start = ttk.Button(ctl, text="Start", command=self._toggle)
+        self.btn_start = ttk.Button(ctrl, text="Start", command=self._toggle)
         self.btn_start.pack(side="left", padx=5, pady=5)
 
-        self.lbl_conn = ttk.Label(ctl, text="Disconnected", foreground="red")
+        self.lbl_conn = ttk.Label(ctrl, text="Disconnected", foreground="red")
         self.lbl_conn.pack(side="left", padx=10)
 
-        # ---- Readings ----
+        # ----- Current readings -----
         read = ttk.LabelFrame(self, text="Current Readings")
         read.pack(fill="x", padx=10, pady=5)
 
@@ -203,31 +221,28 @@ class VCUGui(tk.Tk):
             lbl.pack(side="left", padx=5)
             self.var_ch[ch] = var
 
-        # ---- Plot area with toolbar ----
+        # ----- Plot area -----
         plot_fr = ttk.LabelFrame(self, text="Pressure Plot")
         plot_fr.pack(fill="both", expand=True, padx=10, pady=5)
 
         self.fig, self.ax = plt.subplots(figsize=(8.5, 4), dpi=100)
-
-        # embed the figure
         self.canvas = FigureCanvasTkAgg(self.fig, master=plot_fr)
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
 
-        # **add the navigation toolbar (zoom, pan, save…)**
-        toolbar = NavigationToolbar2Tk(self.canvas, plot_fr)
-        toolbar.update()
-        self.canvas._tkcanvas.pack(fill="both", expand=True)
+        # custom toolbar with Home‑button detection
+        self.toolbar = MyToolbar(self.canvas, self, self)
+        self.toolbar.update()
 
     # ------------------------------------------------------
     def _init_plot(self):
-        self.time_data = []               # seconds since start
+        """Create empty lines and connect the x‑limit callback."""
+        self.time_data = []                 # seconds from start
         self.press_data = {1: [], 2: [], 3: []}
         self.lines = {}
-
         colours = {1: "tab:blue", 2: "tab:orange", 3: "tab:green"}
+
         for ch in (1, 2, 3):
-            line, = self.ax.plot([], [], label=f"CH{ch}",
-                                 color=colours[ch])
+            line, = self.ax.plot([], [], label=f"CH{ch}", color=colours[ch])
             self.lines[ch] = line
 
         self.ax.set_xlabel("Time (s)")
@@ -236,9 +251,24 @@ class VCUGui(tk.Tk):
         self.ax.legend()
         self.fig.tight_layout()
 
+        # Detect manual zoom/pan → stop auto‑scroll
+        self.ax.callbacks.connect('xlim_changed', self._on_xlim_changed)
+
+    # ------------------------------------------------------
+    def _on_xlim_changed(self, ax):
+        """User changed the X limits (zoom/pan); pause auto‑scroll."""
+        if self._updating_limits:
+            return                     # change originated from our own code
+        self.autoscroll = False
+
+    # ------------------------------------------------------
+    def _reset_autoscroll(self):
+        """Called by the toolbar Home button – re‑enable scrolling."""
+        self.autoscroll = True
+
     # ------------------------------------------------------
     def _toggle(self):
-        """Start / Stop acquisition."""
+        """Start or stop measurement."""
         if not self.running:
             try:
                 self.vcu.connect()
@@ -262,51 +292,45 @@ class VCUGui(tk.Tk):
 
     # ------------------------------------------------------
     def _acquire(self):
-        """Read data, update UI, plot, and schedule next call."""
+        """Read data, update UI & plot, then schedule the next call."""
         if not self.running:
             return
 
-        # ---- read the three channels ----
+        # 1️⃣ Read all channels and log them
         readings = self.vcu.read_all_channels()
         self.logger.write(readings, self.unit)
 
-        # ---- update the numeric labels ----
+        # 2️⃣ Update numeric labels
         for r in readings:
             ch = r["channel"]
-            pressure = (f"{r['pressure']:.3g}" if r["pressure"] is not None
-                        else "—")
+            pressure = (f"{r['pressure']:.3g}"
+                        if r["pressure"] is not None else "—")
             self.var_ch[ch].set(f"CH{ch}: {pressure} {self.unit} | {r['status']}")
 
-        # ---- update plot data ----
+        # 3️⃣ Append data to the plot
         elapsed = time.time() - self.start_time
         self.time_data.append(elapsed)
-
         for r in readings:
             ch = r["channel"]
             self.press_data[ch].append(r["pressure"]
-                                      if r["pressure"] is not None
-                                      else float("nan"))
+                                        if r["pressure"] is not None
+                                        else float("nan"))
             self.lines[ch].set_data(self.time_data, self.press_data[ch])
 
-        # ---- keep only the last WINDOW_SECONDS seconds (scrolling) ----
-        if elapsed > self.WINDOW_SECONDS:
-            # drop old points
-            cut_index = next(i for i, t in enumerate(self.time_data)
-                             if t > elapsed - self.WINDOW_SECONDS)
-            self.time_data = self.time_data[cut_index:]
-            for ch in self.press_data:
-                self.press_data[ch] = self.press_data[ch][cut_index:]
+        # 4️⃣ Auto‑scroll handling
+        if self.autoscroll:
+            self._updating_limits = True
+            # full view from start (or use a moving window, e.g. elapsed‑30)
+            self.ax.set_xlim(0, elapsed)
+            self._updating_limits = False
 
-        # ---- set X‑axis to the rolling window (so it scrolls) ----
-        self.ax.set_xlim(max(0, elapsed - self.WINDOW_SECONDS), elapsed)
-
-        # ---- autoscale Y‑axis (keep zoom/pan possible) ----
+        # 5️⃣ Redraw
         self.ax.relim()
-        self.ax.autoscale_view(scalex=False, scaley=True)
-
+        self.ax.autoscale_view(scalex=False)   # keep x‑limits as we set them
         self.canvas.draw_idle()
-        self.after(self.UPDATE_MS, self._acquire)
 
+        # 6️⃣ Schedule next measurement
+        self.after(self.UPDATE_MS, self._acquire)
 
 
 # --------------------------------------------------------------
