@@ -13,7 +13,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolb
 
 matplotlib.use('TkAgg')
 
-class JevaMetVCU:
+class MVC_3:
     STATUS_CODES = {
         '0': 'OK',
         '1': 'Below range',
@@ -179,11 +179,11 @@ class MyToolbar(NavigationToolbar2Tk):
 class VCUGui(tk.Tk):
     UPDATE_MS = 1000          # measurement interval [ms]
 
-    def __init__(self, vcu: JevaMetVCU, logger: CSVLogger):
+    def __init__(self, vcu: MVC_3, logger: CSVLogger):
         super().__init__()
-        self.title("JEVAmet® VCU – Pressure Monitor")
+        self.title("Createch Sputter readout")
         self.geometry("940x660")
-        self.resizable(False, False)
+        self.resizable(True, True)
 
         self.vcu = vcu
         self.logger = logger
@@ -204,7 +204,7 @@ class VCUGui(tk.Tk):
         ctrl = ttk.LabelFrame(self, text="Control")
         ctrl.pack(fill="x", padx=10, pady=5)
 
-        self.btn_start = ttk.Button(ctrl, text="Start", command=self._toggle)
+        self.btn_start = ttk.Button(ctrl, text="Start", command=self._toggle_measurement)
         self.btn_start.pack(side="left", padx=5, pady=5)
 
         self.lbl_conn = ttk.Label(ctrl, text="Disconnected", foreground="red")
@@ -241,9 +241,9 @@ class VCUGui(tk.Tk):
         self.lines = {}
         colours = {1: "tab:blue", 2: "tab:orange", 3: "tab:green"}
 
-        for ch in (1, 2, 3):
-            line, = self.ax.plot([], [], label=f"CH{ch}", color=colours[ch])
-            self.lines[ch] = line
+        for channel in (1, 2, 3):
+            line, = self.ax.plot([], [], label=f"Channel {channel}", color=colours[channel])
+            self.lines[channel] = line
 
         self.ax.set_xlabel("Time (s)")
         self.ax.set_ylabel("Pressure")
@@ -267,18 +267,19 @@ class VCUGui(tk.Tk):
         self.autoscroll = True
 
     # ------------------------------------------------------
-    def _toggle(self):
+    def _toggle_measurement(self):
         """Start or stop measurement."""
         if not self.running:
             try:
                 self.vcu.connect()
                 self.unit = self.vcu.get_pressure_unit()
+                self.ax.set_ylabel("Pressure [{}]".format(self.unit))
                 self.start_time = time.time()
                 self.time_data.clear()
                 for ch in self.press_data:
                     self.press_data[ch].clear()
                 self.btn_start.config(text="Stop")
-                self.lbl_conn.config(text=f"Connected – {self.unit}",
+                self.lbl_conn.config(text=f"Connected",
                                      foreground="green")
                 self.running = True
                 self.after(self.UPDATE_MS, self._acquire)
@@ -302,20 +303,20 @@ class VCUGui(tk.Tk):
 
         # 2️⃣ Update numeric labels
         for r in readings:
-            ch = r["channel"]
+            channel = r["channel"]
             pressure = (f"{r['pressure']:.3g}"
                         if r["pressure"] is not None else "—")
-            self.var_ch[ch].set(f"CH{ch}: {pressure} {self.unit} | {r['status']}")
+            self.var_ch[channel].set(f"CH{channel}: {pressure} {self.unit} | {r['status']}")
 
         # 3️⃣ Append data to the plot
-        elapsed = time.time() - self.start_time
+        elapsed = time.time() - self.start_time - 1
         self.time_data.append(elapsed)
         for r in readings:
-            ch = r["channel"]
-            self.press_data[ch].append(r["pressure"]
+            channel = r["channel"]
+            self.press_data[channel].append(r["pressure"]
                                         if r["pressure"] is not None
                                         else float("nan"))
-            self.lines[ch].set_data(self.time_data, self.press_data[ch])
+            self.lines[channel].set_data(self.time_data, self.press_data[channel])
 
         # 4️⃣ Auto‑scroll handling
         if self.autoscroll:
@@ -337,7 +338,7 @@ class VCUGui(tk.Tk):
 # 5️⃣  Main entry point
 # --------------------------------------------------------------
 def main():
-    vcu = JevaMetVCU(port='COM6')   # <-- adjust if you use another COM port
+    vcu = MVC_3(port='COM6')   # <-- adjust if you use another COM port
     logger = CSVLogger()
     app = VCUGui(vcu, logger)
     app.mainloop()
