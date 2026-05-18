@@ -5,7 +5,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 from serial.tools import list_ports
 
 import matplotlib
@@ -187,35 +187,66 @@ class MyToolbar(NavigationToolbar2Tk):
 #  VCUGui – Tkinter window with scrollable / zoomable plot
 # --------------------------------------------------------------
 class VCUGui(tk.Tk):
+    """
+    Main GUI application for sputter system monitoring.
+
+    Handles:
+    - Live VCU acquisition
+    - Log file playback
+    - Multi-panel plotting
+    - Device connection management
+    """
+
     UPDATE_MS = 1000
 
     def __init__(self, vcu: MVC_3, logger: CSVLogger):
-
         super().__init__()
-        self.title("Createch Sputter readout")
-        self.geometry("1400x700")
-        self.resizable(True, True)
-        self.vcu = vcu
-        self.logger = logger
-        self.running = False
-        self.unit = "unknown"
-        self.start_time = None
-        self.autoscroll = True
-        self._updating_limits = False
-        self.time_data = []
-        self.press_data = {
-            1: [],
-            2: [],
-            3: []
-        }
 
+        self._init_state(vcu, logger)
         self._build_widgets()
 
     # ------------------------------------------------------
+    def _init_state(self, vcu, logger):
+        """
+        Initialize application state variables.
+        """
+        self.title("Createch Sputter readout")
+        self.geometry("1400x700")
+
+        self.vcu = vcu
+        self.logger = logger
+
+        self.running = False
+        self.live_mode = True
+
+        self.unit = "unknown"
+        self.start_time = None
+
+        self.time_data = []
+        self.press_data = {1: [], 2: [], 3: []}
+
+        self.log_time = []
+        self.log_data = {1: [], 2: [], 3: []}
+        self.log_start_datetime = None
+        self.log_end_datetime = None
+
+        self.panels = []
+    # ------------------------------------------------------
     def _build_widgets(self):
-        # -------------------------------
-        # Connection / Start controls
-        # -------------------------------
+        """
+        Create all GUI widgets and layout.
+        """
+        self._build_top_bar()
+        self._build_log_range_slider()
+        self._build_connection_bar()
+        self._build_panel_area()
+        self._build_readout()
+        self.add_panel()
+
+    def _build_top_bar(self):
+        """
+        Start/Stop + log controls.
+        """
         top_bar = ttk.Frame(self)
         top_bar.pack(fill="x", padx=10, pady=5)
 
@@ -233,24 +264,95 @@ class VCUGui(tk.Tk):
         )
         self.lbl_conn.pack(side="left", padx=10)
 
-        # -------------------------------
-        # Multi-panel container
-        # -------------------------------
-        self.panel_container = ttk.Frame(self)
+        ttk.Button(
+            top_bar,
+            text="Load Log",
+            command=self.load_log_file
+        ).pack(side="right", padx=5)
 
-        self.panel_container.pack(
-            fill="both",
-            expand=True,
-            padx=10,
-            pady=5
+        ttk.Button(
+            top_bar,
+            text="Live Mode",
+            command=self.switch_to_live_mode
+        ).pack(side="right", padx=5)
+
+        # --------------------------------------------------
+        # LOG TIME RANGE CONTROLS (ADD HERE)
+        # --------------------------------------------------
+        range_frame = ttk.Frame(top_bar)
+        range_frame.pack(side="right", padx=10)
+
+        ttk.Label(range_frame, text="From (hh:mm):").pack(side="left")
+
+        self.log_from_var = tk.StringVar()
+        self.log_from_entry = ttk.Entry(range_frame, textvariable=self.log_from_var, width=7)
+        self.log_from_entry.pack(side="left", padx=2)
+
+        ttk.Label(range_frame, text="To (hh:mm):").pack(side="left")
+
+        self.log_to_var = tk.StringVar()
+        self.log_to_entry = ttk.Entry(range_frame, textvariable=self.log_to_var, width=7)
+        self.log_to_entry.pack(side="left", padx=2)
+
+        ttk.Button(
+            range_frame,
+            text="Apply",
+            command=self.apply_log_time_filter
+        ).pack(side="left", padx=5)
+
+    def _build_log_range_slider(self):
+        """
+        Creates start/end time sliders for log playback filtering.
+
+        The sliders are only active when a log file is loaded and
+        are clamped to the recorded dataset time range.
+        """
+
+        self.log_slider_frame = ttk.LabelFrame(self, text="Log Time Range")
+        self.log_slider_frame.pack(fill="x", padx=10, pady=5)
+
+        self.log_range_label = ttk.Label(self.log_slider_frame, text="No log loaded")
+        self.log_range_label.pack(side="top", anchor="w", padx=5)
+
+        slider_row = ttk.Frame(self.log_slider_frame)
+        slider_row.pack(fill="x", padx=5, pady=5)
+
+        # START SLIDER
+        self.slider_start = ttk.Scale(
+            slider_row,
+            from_=0,
+            to=1,
+            orient="horizontal",
+            command=self._on_slider_change
         )
+        self.slider_start.pack(side="left", fill="x", expand=True, padx=5)
 
-        self.panels = []
-        self.add_panel() # start with ONE panel only
+        # END SLIDER
+        self.slider_end = ttk.Scale(
+            slider_row,
+            from_=0,
+            to=1,
+            orient="horizontal",
+            command=self._on_slider_change
+        )
+        self.slider_end.pack(side="left", fill="x", expand=True, padx=5)
 
-        # -------------------------------
-        # Connection Settings (COM / Baudrate)
-        # -------------------------------
+        self.slider_start.set(0)
+        self.slider_end.set(1)
+
+    # ------------------------------------------------------
+    def _build_panel_area(self):
+        """
+        Multi-panel container setup.
+        """
+        self.panel_container = ttk.Frame(self)
+        self.panel_container.pack(fill="both", expand=True, padx=10, pady=5)
+
+    # ------------------------------------------------------
+    def _build_connection_bar(self):
+        """
+        COM + baudrate selection UI.
+        """
         conn_frame = ttk.LabelFrame(self, text="Connection Settings")
         conn_frame.pack(fill="x", padx=10, pady=5)
 
@@ -267,7 +369,6 @@ class VCUGui(tk.Tk):
         )
         self.com_dropdown.pack(side="left", padx=5)
 
-        # refresh button for COM
         ttk.Button(
             conn_frame,
             text="⟳",
@@ -279,47 +380,49 @@ class VCUGui(tk.Tk):
 
         self.baud_var = tk.StringVar(value=str(self.vcu.baudrate))
 
-        self.entry_baud = ttk.Entry(
+        ttk.Entry(
             conn_frame,
             textvariable=self.baud_var,
             width=10
-        )
-        self.entry_baud.pack(side="left", padx=5)
+        ).pack(side="left", padx=5)
 
-        ports = self.get_available_ports()
-        self.com_dropdown["values"] = ports
+        self._init_default_port()
 
-        # default selection priority: COM6 → first available → empty
-        if "COM6" in ports:
-            self.com_var.set("COM6")
-        elif ports:
-            self.com_var.set(ports[0])
-        else:
-            self.com_var.set("")
-
-
-        # -------------------------------
-        # Current readings
-        # -------------------------------
-        read = ttk.LabelFrame(self, text="Current Readings")
-
-        read.pack(fill="x", padx=10, pady=5)
+    # ------------------------------------------------------
+    def _build_readout(self):
+        """
+        Current pressure readout labels.
+        """
+        frame = ttk.LabelFrame(self, text="Current Readings")
+        frame.pack(fill="x", padx=10, pady=5)
 
         self.var_ch = {}
 
         for ch in (1, 2, 3):
             var = tk.StringVar(value=f"CH{ch}: – –")
 
-            lbl = ttk.Label(
-                read,
+            ttk.Label(
+                frame,
                 textvariable=var,
                 width=30,
                 anchor="w"
-            )
-
-            lbl.pack(side="left", padx=5)
+            ).pack(side="left", padx=5)
 
             self.var_ch[ch] = var
+
+    # ------------------------------------------------------
+    def _init_default_port(self):
+        """
+        Select COM6 if available, otherwise fallback.
+        """
+        ports = self.get_available_ports()
+
+        self.com_dropdown["values"] = ports
+
+        if "COM6" in ports:
+            self.com_var.set("COM6")
+        elif ports:
+            self.com_var.set(ports[0])
 
     def refresh_ports(self):
         ports = self.get_available_ports()
@@ -385,6 +488,166 @@ class VCUGui(tk.Tk):
         ports = list_ports.comports()
         return [p.device for p in ports]
 
+    def load_log_file(self):
+        """
+        Load a CSV log file and switch GUI into offline playback mode.
+
+        This function:
+        - Reads timestamped pressure logs
+        - Stores both datetime and relative time
+        - Computes full available time range
+        - Updates GUI range display
+        """
+
+        filepath = filedialog.askopenfilename(
+            filetypes=[("CSV files", "*.csv")]
+        )
+
+        if not filepath:
+            return
+
+        self.live_mode = False
+
+        self.log_time = []
+        self.log_datetime = []
+        self.log_data = {1: [], 2: [], 3: []}
+
+        with open(filepath, "r") as f:
+            reader = csv.reader(f)
+            rows = list(reader)
+
+        if len(rows) < 2:
+            messagebox.showerror("Error", "File is empty or invalid")
+            return
+
+        header = rows[0]
+
+        ch_cols = {}
+        time_idx = 0
+
+        for i, col in enumerate(header):
+            if col.startswith("ch") and "_pressure" in col:
+                ch = int(col[2])
+                ch_cols[ch] = i
+            elif col == "timestamp":
+                time_idx = i
+
+        from datetime import datetime
+
+        base_time = None
+
+        for row in rows[1:]:
+            try:
+                t = datetime.strptime(row[time_idx], "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                continue
+
+            if base_time is None:
+                base_time = t
+
+            self.log_datetime.append(t)
+            self.log_time.append((t - base_time).total_seconds())
+
+            for ch in ch_cols:
+                try:
+                    val = float(row[ch_cols[ch]])
+                except Exception:
+                    val = float("nan")
+
+                self.log_data[ch].append(val)
+
+        # -----------------------------
+        # STORE RANGE INFO
+        # -----------------------------
+        self.log_start_time = self.log_time[0]
+        self.log_end_time = self.log_time[-1]
+
+        # update slider bounds
+        self.slider_start.config(from_=self.log_start_time, to=self.log_end_time)
+        self.slider_end.config(from_=self.log_start_time, to=self.log_end_time)
+
+        self.slider_start.set(self.log_start_time)
+        self.slider_end.set(self.log_end_time)
+
+        # update label
+        start_hhmm = self._format_hhmm(self.log_time[0])
+        end_hhmm = self._format_hhmm(self.log_time[-1])
+
+        duration_sec = self.log_time[-1] - self.log_time[0]
+        duration_h = int(duration_sec // 3600)
+        duration_m = int((duration_sec % 3600) // 60)
+
+        self.log_range_label.config(
+            text=(
+                f"Available range: {start_hhmm} → {end_hhmm}  "
+                f"(duration {duration_h:02d}:{duration_m:02d})"
+            )
+        )
+
+        self.update_log_plot()
+
+    def apply_log_time_filter(self):
+        """
+        Filter loaded log data by user-defined HH:MM time range.
+        """
+
+        if not self.log_datetime:
+            return
+
+        try:
+            t_from = datetime.strptime(self.log_from_var.get(), "%H:%M").time()
+            t_to = datetime.strptime(self.log_to_var.get(), "%H:%M").time()
+        except ValueError:
+            messagebox.showerror(
+                "Format error",
+                "Please use HH:MM format (e.g. 12:30)"
+            )
+            return
+
+        filtered_time = []
+        filtered_data = {1: [], 2: [], 3: []}
+
+        for i, dt in enumerate(self.log_datetime):
+
+            current_time = dt.time()
+
+            if t_from <= t_to:
+                valid = t_from <= current_time <= t_to
+            else:
+                # handles overnight ranges like 23:00 → 02:00
+                valid = current_time >= t_from or current_time <= t_to
+
+            if valid:
+                filtered_time.append(self.log_time[i])
+
+                for ch in filtered_data:
+                    filtered_data[ch].append(self.log_data[ch][ch] if False else self.log_data[ch][i])
+
+        if not filtered_time:
+            messagebox.showwarning("No data", "No data in selected time range")
+            return
+
+        for panel in self.panels:
+            panel.update_plot(filtered_time, filtered_data, self.unit)
+
+
+    def update_log_plot(self):
+        """
+        Render loaded log file data across all active panels.
+
+        This function is called after a CSV log is loaded and is responsible
+        for pushing historical time-series data into all DevicePanel instances.
+
+        Returns
+        -------
+        None
+        """
+        for panel in self.panels:
+            panel.update_plot(
+                self.log_time,
+                self.log_data,
+                self.unit
+            )
     # ------------------------------------------------------
     def _init_plot(self):
         """Create empty lines and connect the x‑limit callback."""
@@ -482,59 +745,117 @@ class VCUGui(tk.Tk):
 
     # ------------------------------------------------------
     def _acquire(self):
+        """
+        Acquire data from VCU and update plots.
+        """
 
         if not self.running:
             return
 
         readings = self.vcu.read_all_channels()
+        self.logger.write(readings, self.unit)
 
-        self.logger.write(
-            readings,
-            self.unit
-        )
-
+        # update readout labels
         for r in readings:
-            channel = r["channel"]
+            ch = r["channel"]
 
-            pressure = (
+            val = (
                 f"{r['pressure']:.3g}"
                 if r["pressure"] is not None
                 else "—"
             )
 
-            self.var_ch[channel].set(
-                f"CH{channel}: "
-                f"{pressure} {self.unit} | "
-                f"{r['status']}"
+            self.var_ch[ch].set(
+                f"CH{ch}: {val} {self.unit} | {r['status']}"
             )
 
         elapsed = time.time() - self.start_time
 
-        self.time_data.append(elapsed)
+        # -----------------------
+        # LIVE MODE ONLY
+        # -----------------------
+        if self.live_mode:
+            self.time_data.append(elapsed)
 
-        for r in readings:
-            channel = r["channel"]
+            for r in readings:
+                ch = r["channel"]
+                self.press_data[ch].append(
+                    r["pressure"] if r["pressure"] is not None else float("nan")
+                )
 
-            self.press_data[channel].append(
-                r["pressure"]
-                if r["pressure"] is not None
-                else float("nan")
-            )
+            self._update_all_panels(self.time_data, self.press_data)
 
-        # -------------------------------
-        # Update all panels
-        # -------------------------------
+        self.after(self.UPDATE_MS, self._acquire)
+
+    def _update_all_panels(self, t, data):
+        """
+        Push data to all panels.
+        """
         for panel in self.panels:
-            panel.update_plot(
-                self.time_data,
-                self.press_data,
-                self.unit
-            )
+            panel.update_plot(t, data, self.unit)
 
-        self.after(
-            self.UPDATE_MS,
-            self._acquire
-        )
+    def _on_slider_change(self, _event=None):
+        """
+        Called whenever the user moves start/end slider.
+
+        Filters displayed log data to selected time range.
+        """
+
+        if not self.log_time:
+            return
+
+        t_min = min(self.slider_start.get(), self.slider_end.get())
+        t_max = max(self.slider_start.get(), self.slider_end.get())
+
+        filtered_t = []
+        filtered_data = {1: [], 2: [], 3: []}
+
+        for i, t in enumerate(self.log_time):
+            if t_min <= t <= t_max:
+                filtered_t.append(t)
+                for ch in filtered_data:
+                    filtered_data[ch].append(self.log_data[ch][i])
+
+        # update all panels
+        for panel in self.panels:
+            panel.update_plot(filtered_t, filtered_data, self.unit)
+
+    def switch_to_live_mode(self):
+        """
+        Switch GUI back to live acquisition mode.
+
+        This clears previously loaded log data buffers and re-enables
+        real-time plotting from the connected VCU device.
+
+        Returns
+        -------
+        None
+        """
+        self.live_mode = True
+
+        self.time_data = []
+        self.press_data = {1: [], 2: [], 3: []}
+
+        messagebox.showinfo("Mode", "Switched to live mode")
+
+    def _format_hhmm(self, seconds):
+        """
+        Convert seconds (float) into HH:MM string.
+
+        Parameters
+        ----------
+        seconds : float
+            Time in seconds.
+
+        Returns
+        -------
+        str
+            Formatted time string HH:MM
+        """
+        total_minutes = int(seconds // 60)
+        hours = total_minutes // 60
+        minutes = total_minutes % 60
+        return f"{hours:02d}:{minutes:02d}"
 
 class DevicePanel(ttk.LabelFrame):
     def __init__(self, parent, gui, panel_id, on_close=None):
